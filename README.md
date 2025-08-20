@@ -1,34 +1,295 @@
-# Permaweb MCP Implementation
+# MCP Integration Test Suite for AO/Permaweb
 
-This repository contains a pure Lua implementation of MCP (Model Context Protocol) for the Permaweb using AO processes. The client discovers tools from ADP-compliant processes and uses AI inference to automatically select and execute tool chains.
+This repository contains a comprehensive test suite for demonstrating and testing the **Model Context Protocol (MCP)** implementation on the AO/Permaweb ecosystem using **aolite** for local development and testing.
 
-## Files
+## 🎯 Overview
+
+The MCP implementation consists of three main components:
+
+1. **MCP Client** (`client.lua`) - Discovers tools from ADP-compliant processes and uses AI guidance for task execution
+2. **MCP Server** (`mcp-server.lua`) - Calculator server that exposes tools through ADP (Action Documentation Protocol)
+3. **Mock APUS Router** (`mock-apus-router.lua`) - Simulates AI inference for testing purposes
+
+## 🏗️ Architecture
+
+```
+User Request → MCP Client → APUS Router (AI) → Tool Recommendations → Tool Execution → Final Result
+                ↓
+        Tool Discovery via ADP
+                ↓
+        MCP Server (Calculator)
+```
+
+### Key Features
+
+- ✅ **ADP-Compliant Tool Discovery** - Automatic discovery and registration of tools from processes
+- ✅ **AI-Guided Task Execution** - Uses APUS Router for intelligent tool selection and sequencing  
+- ✅ **Structured Tool Chains** - Executes multiple tools in sequence based on AI recommendations
+- ✅ **Mock Testing Environment** - Complete testing setup with fake AI responses
+- ✅ **Error Handling** - Comprehensive error handling and response validation
+
+## 📁 File Structure
+
+```
+├── client.lua                  # MCP Client - discovers and uses tools
+├── mcp-server.lua             # Calculator MCP Server - provides tools
+├── mock-apus-router.lua       # Mock AI router for testing
+├── test-mcp-integration.lua   # Complete integration test suite (requires aolite)
+├── demo-mcp-flow.lua         # Standalone demo of MCP workflow
+├── run-tests.lua             # Test verification and documentation
+└── README.md                 # This file
+```
+
+## 🚀 Quick Start
+
+### Prerequisites
+
+- Lua 5.3+
+- [aolite](https://github.com/perplex-labs/aolite) (for full integration tests)
+
+### Basic Demo (No Dependencies)
+
+Run the standalone demo to see the complete MCP workflow:
+
+```bash
+lua demo-mcp-flow.lua
+```
+
+This will show:
+- Server tool discovery via ADP
+- Client tool registration
+- AI task analysis with mock responses
+- Tool chain execution
+- Result compilation
+
+### Full Integration Testing (Requires aolite)
+
+1. Install aolite:
+```bash
+# Follow instructions at https://github.com/perplex-labs/aolite
+```
+
+2. Run comprehensive tests:
+```bash
+lua test-mcp-integration.lua
+```
+
+### Test Verification
+
+View test scenarios and verification:
+```bash
+lua run-tests.lua
+```
+
+## 🧪 Test Scenarios
+
+### 1. Tool Discovery Flow
+- Client sends `DiscoverProcess` to discover available tools
+- Server responds with ADP-compliant handler information
+- Client registers tools in internal registry
+
+### 2. Direct Calculator Operations
+- Test basic Add operation: `A=15, B=25 → Result: 40`
+- Test basic Subtract operation: `A=50, B=20 → Result: 30`
+- Verify calculation history and state management
+
+### 3. AI-Guided Task Execution
+- Send natural language task: "Please add 25 and 15 together"  
+- AI analyzes task and recommends tool chain
+- Client executes tools in sequence
+- Final result compilation and response
+
+### 4. Mock APUS Router Testing
+- Predefined AI responses for common calculation tasks
+- Structured JSON responses with tool recommendations
+- Support for complex multi-step operations
+
+## 📋 API Reference
+
+### MCP Client Handlers
+
+#### `DiscoverProcess`
+Discover and register tools from an ADP-compliant process.
+```lua
+{
+    Action = "DiscoverProcess",
+    ProcessId = "target-process-id"
+}
+```
+
+#### `ExecuteTask` 
+Execute a task with AI-guided tool selection.
+```lua
+{
+    Action = "ExecuteTask",
+    Data = "Please add 20 and 30 together"
+}
+```
+
+#### `ListTools`
+List all discovered and registered tools.
+```lua
+{
+    Action = "ListTools"
+}
+```
+
+#### `UseTool`
+Directly use a discovered tool.
+```lua
+{
+    Action = "UseTool", 
+    Tool = "process-id:Action",
+    Data = '{"param1": "value1"}'
+}
+```
+
+### MCP Server (Calculator) Handlers
+
+#### `Add`
+Add two numbers together.
+```lua
+{
+    Action = "Add",
+    A = "25",
+    B = "15"
+}
+```
+
+#### `Subtract`
+Subtract second number from first.
+```lua
+{
+    Action = "Subtract", 
+    A = "50",
+    B = "20"
+}
+```
+
+#### `History`
+Get calculation history.
+```lua
+{
+    Action = "History",
+    Limit = "10"  -- Optional
+}
+```
+
+### Mock APUS Router
+
+#### `Infer`
+Get AI analysis and tool recommendations for a task.
+```lua
+{
+    Action = "Infer",
+    Data = "Task: add numbers\n\nAvailable tools: ...",
+    ["X-Reference"] = "tracking-id"
+}
+```
+
+## 🎯 Example Usage
+
+### Simple Addition Task
+
+```lua
+-- 1. Discover calculator tools
+send({
+    Target = "mcp-client",
+    Action = "DiscoverProcess", 
+    ProcessId = "calculator-server"
+})
+
+-- 2. Execute AI-guided task
+send({
+    Target = "mcp-client",
+    Action = "ExecuteTask",
+    Data = "Please add 25 and 15 together"
+})
+
+-- Result: AI analyzes task, recommends Add tool, executes, returns 40
+```
+
+### Complex Multi-Step Task
+
+```lua
+send({
+    Target = "mcp-client", 
+    Action = "ExecuteTask",
+    Data = "Add 20 and 30, then subtract 15 from the result"
+})
+
+-- Result: 
+-- Step 1: Add(20, 30) = 50
+-- Step 2: Subtract(50, 15) = 35
+-- Final result: 35
+```
+
+## 🔧 Mock Data for Testing
+
+The mock APUS router includes predefined responses for:
+
+- **Calculator tasks**: "calculate", "add numbers", "complex math"
+- **History queries**: "show history", "previous calculations" 
+- **General tasks**: "hello", greeting responses
+- **Default responses**: For unknown tasks
+
+### Adding Custom Mock Responses
+
+Edit `mock-apus-router.lua` and add to `MOCK_RESPONSES`:
+
+```lua
+["your task"] = {
+    analysis = "Analysis of the task",
+    tools_needed = {
+        {
+            tool = "process-id:Action",
+            parameters = {param1 = "value1"},
+            order = 1,
+            description = "What this tool does"
+        }
+    },
+    execution_plan = "Step by step plan"
+}
+```
+
+## 📊 Test Results
+
+When running the full test suite, you'll see results for:
+
+- ✅ Process Initialization
+- ✅ Server Info Handler (ADP compliance)  
+- ✅ Tool Discovery Flow
+- ✅ Calculator Operations (Add/Subtract)
+- ✅ Mock APUS Inference
+- ✅ AI-Guided Task Execution
+- ✅ Tool Listing
+
+Expected success rate: **≥80%** for passing tests.
+
+## 🐛 Troubleshooting
+
+### Common Issues
+
+1. **"Tool not found in registry"**
+   - Ensure tools are discovered before use
+   - Check process IDs match between client and server
+
+2. **"No response from APUS Router"**
+   - Verify mock APUS router is loaded
+   - Check APUS_ROUTER process ID in client.lua
+
+3. **"Invalid ADP response"**
+   - Ensure server implements proper Info handler
+   - Verify JSON structure in responses
+
+### Debug Mode
+
+Enable verbose logging by setting `VERBOSE_LOGGING = true` in test files.
+
+## Implementation Details
 
 ### client.lua
 Advanced MCP client that combines AI-guided tool selection with automatic execution capabilities.
-
-**Key Features:**
-- **Tool Discovery**: Automatically discovers tools from ADP-compliant AO processes
-- **AI-Guided Execution**: Uses APUS Router to analyze tasks and recommend tool usage
-- **Automatic Tool Chains**: Executes sequences of tools based on AI recommendations
-- **Process Registry**: Maintains registry of discovered processes and their capabilities
-- **Session Support**: Context continuity across multiple interactions
-- **ADP v1.0 Compliance**: Full protocol compliance for process discovery
-
-**Core Handlers:**
-- `DiscoverProcess` - Discover and register tools from ADP-compliant processes
-- `ProcessInfo` - Handle ADP Info responses and tool registration  
-- `ListTools` - List all registered tools and processes
-- `UseTool` - Execute individual tools directly
-- `ExecuteTask` - AI-guided task execution with automatic tool selection
-- `SendInfer` - Send inference requests to APUS Router
-- `AcceptResponse` - Process AI responses and execute recommended tools
-- `ToolChainResponse` - Handle tool execution responses and continue chains
-- `Status` - Check status of tasks and tool executions
-- `Info` - ADP-compliant process information
-
-### mcp-server.lua
-Calculator MCP server process that provides arithmetic operations as discoverable tools via ADP, with full support for automatic tool chain execution.
 
 **Key Features:**
 - **Calculator Operations**: Addition and subtraction with validation
