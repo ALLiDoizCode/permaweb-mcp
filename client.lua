@@ -1,528 +1,773 @@
--- AO MCP Client Process with ADP Discovery
--- This process orchestrates AI and tool processes using the AO Documentation Protocol
+-- MCP Client for AO/Permaweb Implementation
+-- This client discovers and uses tools from ADP-compliant processes
+-- while using APUS Router for AI inference to guide tool selection
 
-local json = require("json")
+-- APUS Router Process ID
+APUS_ROUTER = "Bf6JJR2tl2Wr38O2-H6VctqtduxHgKF-NzRB9HhTRzo"
 
--- Configuration
-local ADP_VERSION = "1.0"
-local AI_PROCESS = "" -- Set this to your AI process ID
-local DEFAULT_TIMEOUT = 30000 -- 30 seconds
+-- Task tracking storage
+Tasks = Tasks or {}
 
--- State
-local availableTools = {}
-local processCapabilities = {}
-local activeQueries = {}
-local registeredProcesses = {}
+-- Tool registry for discovered ADP tools
+ToolRegistry = ToolRegistry or {
+    processes = {},
+    tools = {},
+    initialized = false
+}
 
--- Utility Functions
-function generateId()
-  return tostring(math.random(100000, 999999)) .. "-" .. tostring(os.time())
+-- Generate a unique reference ID for tracking requests
+local function generateReference()
+    return tostring(os.time()) .. "-" .. tostring(math.random(1000, 9999))
 end
 
-function validateProcessId(processId)
-  return processId and type(processId) == "string" and #processId > 0
-end
-
-function toolsToString()
-  local toolList = {}
-  for toolName, tool in pairs(availableTools) do
-    table.insert(toolList, string.format("%s: %s", toolName, tool.description))
-  end
-  return table.concat(toolList, "\n")
-end
-
-function parseToolCalls(response)
-  -- Try to parse JSON array of tool calls
-  local success, parsed = pcall(json.decode, response)
-  if success and type(parsed) == "table" then
-    return parsed
-  end
-  
-  -- Check for "none" response
-  if string.lower(response):match("none") then
-    return "none"
-  end
-  
-  -- Default to no tools
-  return "none"
-end
-
--- ADP Functions
-function registerToolFromADP(processId, handlerSpec)
-  local toolName = handlerSpec.name
-  
-  availableTools[toolName] = {
-    process = processId,
-    action = handlerSpec.action,
-    description = handlerSpec.description,
-    parameters = handlerSpec.parameters or {},
-    returns = handlerSpec.returns or {}
-  }
-  
-  print("Registered tool: " .. toolName .. " from process: " .. processId)
-end
-
-function discoverProcessCapabilities(processId)
-  if not validateProcessId(processId) then
-    return nil
-  end
-  
-  print("Discovering capabilities for process: " .. processId)
-  
-  ao.send({
-    Target = processId,
-    Action = "Info"
-  })
-  
-  -- Note: In a real implementation, you'd handle the response asynchronously
-  -- This is a simplified version for demonstration
-end
-
-function buildToolMessage(tool, toolCall)
-  local message = {
-    Target = tool.process,
-    Action = tool.action,
-    Data = ""
-  }
-  
-  -- Handle parameters according to ADP spec
-  if toolCall.params then
-    for paramName, paramValue in pairs(toolCall.params) do
-      if paramName == "Data" then
-        message.Data = tostring(paramValue)
-      else
-        message.Tags = message.Tags or {}
-        message.Tags[paramName] = tostring(paramValue)
-      end
+-- Execute a chain of tools based on AI recommendations
+local function executeToolChain(taskReference, toolIndex)
+    local task = Tasks[taskReference]
+    if not task or not task.toolsToExecute or toolIndex > #task.toolsToExecute then
+        -- All tools executed, compile final result
+        finalizeToolExecution(taskReference)
+        return
     end
-  end
-  
-  return message
-end
-
--- Core MCP Logic
-function executeADPTools(toolCalls, originalQuery, originalMsg, queryId)
-  if not toolCalls or #toolCalls == 0 then
-    finalResponse(originalMsg, originalQuery, {}, queryId)
-    return
-  end
-  
-  local results = {}
-  local completed = 0
-  local totalTools = #toolCalls
-  
-  print(string.format("Executing %d tools for query %s", totalTools, queryId))
-  
-  for i, toolCall in ipairs(toolCalls) do
-    local tool = availableTools[toolCall.name]
+    
+    local toolSpec = task.toolsToExecute[toolIndex]
+    local toolKey = toolSpec.tool
+    local tool = ToolRegistry.tools[toolKey]
     
     if not tool then
-      print("Tool not found: " .. (toolCall.name or "unknown"))
-      results[i] = {
-        tool = toolCall.name,
-        error = "Tool not found",
-        result = ""
-      }
-      completed = completed + 1
-    else
-      local toolMessage = buildToolMessage(tool, toolCall)
-      toolMessage.Tags = toolMessage.Tags or {}
-      toolMessage.Tags.QueryId = queryId
-      toolMessage.Tags.ToolIndex = tostring(i)
-      
-      print("Calling tool: " .. toolCall.name)
-      ao.send(toolMessage)
-    end
-  end
-  
-  -- If all tools failed immediately
-  if completed == totalTools then
-    finalResponse(originalMsg, originalQuery, results, queryId)
-  end
-end
-
-function finalResponse(originalMsg, query, toolResults, queryId)
-  if not AI_PROCESS or AI_PROCESS == "" then
-    originalMsg.reply({
-      Data = "Error: AI_PROCESS not configured",
-      Action = "QueryResponse",
-      Tags = { QueryId = queryId, Error = "Configuration" }
-    })
-    return
-  end
-  
-  local contextPrompt = "User query: " .. query
-  
-  if toolResults and #toolResults > 0 then
-    contextPrompt = contextPrompt .. "\n\nTool results:\n"
-    for _, result in ipairs(toolResults) do
-      if result.error then
-        contextPrompt = contextPrompt .. result.tool .. " (ERROR): " .. result.error .. "\n"
-      else
-        contextPrompt = contextPrompt .. result.tool .. ": " .. (result.result or "") .. "\n"
-      end
-    end
-  end
-  
-  contextPrompt = contextPrompt .. "\n\nProvide a helpful response based on the above information:"
-  
-  ao.send({
-    Target = AI_PROCESS,
-    Action = "Infer",
-    Data = contextPrompt,
-    Tags = { QueryId = queryId, Stage = "Final" }
-  })
-end
-
--- Handlers
-
--- ADP Compliance - Info Handler
-Handlers.add("Info",
-  { Action = "Info" },
-  function(msg)
-    local adpInfo = {
-      version = ADP_VERSION,
-      name = "MCP Client Process",
-      description = "Orchestrates AI and tool processes using ADP discovery",
-      handlers = {
-        {
-          name = "Query",
-          action = "Query",
-          description = "Process user queries with AI and tool orchestration",
-          parameters = {
-            required = {
-              {
-                name = "Data",
-                type = "string",
-                description = "User query to process"
-              }
-            },
-            optional = {
-              {
-                name = "AIProcess",
-                type = "string",
-                description = "Override default AI process ID"
-              }
-            }
-          },
-          returns = {
-            type = "string",
-            description = "AI response with tool integration"
-          }
-        },
-        {
-          name = "RegisterProcess",
-          action = "RegisterProcess",
-          description = "Register a new ADP-compliant process",
-          parameters = {
-            required = {
-              {
-                name = "ProcessId",
-                type = "string",
-                description = "Process ID to register"
-              }
-            }
-          }
-        },
-        {
-          name = "ListTools",
-          action = "ListTools",
-          description = "List all available registered tools",
-          parameters = {},
-          returns = {
-            type = "object",
-            description = "Dictionary of available tools and their capabilities"
-          }
-        },
-        {
-          name = "SetAIProcess",
-          action = "SetAIProcess", 
-          description = "Set the AI process ID for inference",
-          parameters = {
-            required = {
-              {
-                name = "ProcessId",
-                type = "string",
-                description = "AI process ID"
-              }
-            }
-          }
-        }
-      }
-    }
-    
-    msg.reply({
-      Data = json.encode(adpInfo),
-      Action = "Info-Response"
-    })
-  end
-)
-
--- Main Query Handler
-Handlers.add("Query",
-  { Action = "Query" },
-  function(msg)
-    local userQuery = msg.Data
-    local queryId = generateId()
-    local aiProcess = msg.Tags.AIProcess or AI_PROCESS
-    
-    if not aiProcess or aiProcess == "" then
-      msg.reply({
-        Data = "Error: No AI process configured. Use SetAIProcess action first.",
-        Action = "QueryResponse",
-        Tags = { QueryId = queryId, Error = "NoAI" }
-      })
-      return
+        -- Tool not found, record error and continue
+        table.insert(task.toolResults, {
+            toolIndex = toolIndex,
+            tool = toolKey,
+            success = false,
+            error = "Tool not found in registry",
+            timestamp = os.time()
+        })
+        executeToolChain(taskReference, toolIndex + 1)
+        return
     end
     
-    -- Store query context
-    activeQueries[queryId] = {
-      originalMsg = msg,
-      query = userQuery,
-      aiProcess = aiProcess,
-      timestamp = os.time()
-    }
-    
-    print("Processing query: " .. queryId)
-    
-    -- Build tool descriptions from available tools
-    local toolDescriptions = {}
-    for toolName, tool in pairs(availableTools) do
-      table.insert(toolDescriptions, {
-        name = toolName,
-        description = tool.description,
-        parameters = tool.parameters
-      })
+    -- Build message tags from AI-recommended parameters
+    local messageTags = { Action = tool.action }
+    if toolSpec.parameters and type(toolSpec.parameters) == "table" then
+        for key, value in pairs(toolSpec.parameters) do
+            messageTags[key] = tostring(value)
+        end
     end
     
-    local analysisPrompt = string.format([[
-User query: %s
-
-Available tools (ADP-discovered):
-%s
-
-Analyze the query and determine which tools to call. Respond with a JSON array of tool calls with exact parameter names from ADP specs, or respond with exactly "none" if no tools are needed.
-
-Example format for tool calls:
-[{"name": "GetWeather", "params": {"Location": "New York", "Units": "metric"}}]
-
-Response:]], userQuery, json.encode(toolDescriptions))
-
+    -- Track this tool execution
+    task.currentToolIndex = toolIndex
+    task.currentToolReference = generateReference()
+    
+    print("Executing tool " .. toolIndex .. "/" .. #task.toolsToExecute .. ": " .. toolKey)
+    
+    -- Send tool execution request
     ao.send({
-      Target = aiProcess,
-      Action = "Infer",
-      Data = analysisPrompt,
-      Tags = { QueryId = queryId, Stage = "Analysis" }
+        Target = tool.processId,
+        Tags = messageTags,
+        ["Tool-Chain-Reference"] = taskReference,
+        ["Tool-Index"] = tostring(toolIndex),
+        ["Tool-Reference"] = task.currentToolReference
     })
-  end
-)
+end
 
--- Handle AI Analysis Response
-Handlers.add("AIAnalysisResponse",
-  { Action = "InferResponse" },
-  function(msg)
-    local queryId = msg.Tags.QueryId
-    local stage = msg.Tags.Stage
+-- Finalize tool execution and send comprehensive result
+local function finalizeToolExecution(taskReference)
+    local task = Tasks[taskReference]
+    if not task then return end
     
-    if not queryId or not activeQueries[queryId] then
-      print("Received response for unknown query: " .. (queryId or "nil"))
-      return
+    task.status = "success"
+    local successfulTools = 0
+    local failedTools = 0
+    
+    for _, result in ipairs(task.toolResults) do
+        if result.success then
+            successfulTools = successfulTools + 1
+        else
+            failedTools = failedTools + 1
+        end
     end
     
-    local queryContext = activeQueries[queryId]
+    ao.send({
+        Target = task.requestor,
+        Action = "Task-Completed",
+        Data = json.encode({
+            reference = taskReference,
+            task = task.task,
+            aiAnalysis = task.aiAnalysis,
+            executionPlan = task.executionPlan,
+            toolsUsed = #task.toolResults,
+            successfulTools = successfulTools,
+            failedTools = failedTools,
+            toolResults = task.toolResults,
+            duration = os.time() - task.starttime,
+            completed = true
+        })
+    })
     
-    if stage == "Analysis" then
-      -- Parse tool analysis
-      local toolCalls = parseToolCalls(msg.Data)
-      
-      if toolCalls == "none" then
-        -- No tools needed, go directly to final response
-        finalResponse(queryContext.originalMsg, queryContext.query, {}, queryId)
-      else
-        -- Execute tools
-        executeADPTools(toolCalls, queryContext.query, queryContext.originalMsg, queryId)
-      end
-      
-    elseif stage == "Final" then
-      -- Final AI response
-      queryContext.originalMsg.reply({
-        Data = msg.Data,
-        Action = "QueryResponse",
-        Tags = { QueryId = queryId }
-      })
-      
-      -- Clean up
-      activeQueries[queryId] = nil
-      print("Query completed: " .. queryId)
-    end
-  end
-)
+    print("Tool chain execution completed for task: " .. task.task .. 
+          " (Success: " .. successfulTools .. ", Failed: " .. failedTools .. ")")
+end
 
--- Handle Tool Responses
-Handlers.add("ToolResponse",
-  function(msg)
-    return msg.Tags.QueryId and msg.Tags.ToolIndex
-  end,
-  function(msg)
-    local queryId = msg.Tags.QueryId
-    local toolIndex = tonumber(msg.Tags.ToolIndex)
-    
-    if not activeQueries[queryId] then
-      print("Received tool response for unknown query: " .. queryId)
-      return
+-- Initialize the MCP client
+local function initializeMCPClient()
+    if not ToolRegistry.initialized then
+        ToolRegistry.processes = {}
+        ToolRegistry.tools = {}
+        ToolRegistry.initialized = true
+        print("MCP Client initialized - ready to discover tools")
     end
-    
-    local queryContext = activeQueries[queryId]
-    
-    -- Initialize results if not exists
-    if not queryContext.toolResults then
-      queryContext.toolResults = {}
-      queryContext.completedTools = 0
-      queryContext.expectedTools = queryContext.expectedTools or 1
+end
+
+-- Register tools from an ADP-compliant process
+local function registerToolsFromProcess(processId, adpInfo)
+    if not adpInfo.handlers then
+        return false
     end
-    
-    -- Store result
-    queryContext.toolResults[toolIndex] = {
-      tool = msg.Tags.Tool or "unknown",
-      result = msg.Data,
-      action = msg.Action
+
+    ToolRegistry.processes[processId] = {
+        name = adpInfo.name or "Unknown Process",
+        version = adpInfo.version or "1.0.0",
+        description = adpInfo.description or "",
+        capabilities = adpInfo.capabilities or {},
+        registeredAt = os.time()
     }
-    
-    queryContext.completedTools = queryContext.completedTools + 1
-    
-    print(string.format("Tool response %d/%d for query %s", 
-          queryContext.completedTools, queryContext.expectedTools, queryId))
-    
-    -- Check if all tools completed
-    if queryContext.completedTools >= queryContext.expectedTools then
-      finalResponse(queryContext.originalMsg, queryContext.query, queryContext.toolResults, queryId)
+
+    local toolCount = 0
+    for _, handler in ipairs(adpInfo.handlers) do
+        if handler.category ~= "core" then -- Skip core handlers like Info
+            local toolKey = processId .. ":" .. handler.action
+            ToolRegistry.tools[toolKey] = {
+                processId = processId,
+                action = handler.action,
+                description = handler.description or "",
+                parameters = handler.tags or {},
+                category = handler.category or "general",
+                examples = handler.examples or {}
+            }
+            toolCount = toolCount + 1
+        end
     end
-  end
+
+    print("Registered " .. toolCount .. " tools from " .. (adpInfo.name or processId))
+    return true
+end
+
+-- Handler: Discover tools from a process via ADP
+Handlers.add("DiscoverProcess", Handlers.utils.hasMatchingTag("Action", "DiscoverProcess"),
+    function(msg)
+        local processId = msg.Tags.ProcessId or msg.Tags.Process
+
+        if not processId then
+            ao.send({
+                Target = msg.From,
+                Action = "DiscoverProcess-Response",
+                Data = json.encode({
+                    success = false,
+                    error = "ProcessId is required"
+                })
+            })
+            return
+        end
+
+        initializeMCPClient()
+
+        -- Request Info from the target process to discover tools
+        ao.send({
+            Target = processId,
+            Action = "Info"
+        })
+
+        ao.send({
+            Target = msg.From,
+            Action = "DiscoverProcess-Response",
+            Data = json.encode({
+                success = true,
+                processId = processId,
+                message = "Tool discovery initiated for process: " .. processId
+            })
+        })
+    end
 )
 
--- Process Registration Handler
-Handlers.add("RegisterProcess",
-  { Action = "RegisterProcess" },
-  function(msg)
-    local processId = msg.Tags.ProcessId or msg.Data
+-- Handler: Receive tool execution responses during chain execution
+Handlers.add("ToolChainResponse", function(msg)
+    local chainReference = msg.Tags["Tool-Chain-Reference"]
+    local toolIndex = tonumber(msg.Tags["Tool-Index"])
     
-    if not validateProcessId(processId) then
-      msg.reply({
-        Data = "Error: Invalid process ID provided",
-        Action = "RegistrationResponse",
-        Tags = { Error = "InvalidProcessId" }
-      })
-      return
+    if chainReference and toolIndex and Tasks[chainReference] then
+        local task = Tasks[chainReference]
+        
+        -- Record tool result
+        local result = {
+            toolIndex = toolIndex,
+            tool = task.toolsToExecute[toolIndex].tool,
+            success = false,
+            timestamp = os.time(),
+            response = msg.Data
+        }
+        
+        -- Check if this looks like a successful response
+        local success, responseData = pcall(json.decode, msg.Data or "{}")
+        if success and responseData and responseData.success ~= false then
+            result.success = true
+            result.data = responseData
+        elseif msg.Data and not msg.Data:find("error") and not msg.Data:find("failed") then
+            result.success = true
+        else
+            result.error = msg.Data or "Unknown error"
+        end
+        
+        table.insert(task.toolResults, result)
+        
+        print("Tool " .. toolIndex .. " completed: " .. (result.success and "SUCCESS" or "FAILED"))
+        
+        -- Continue with next tool in chain
+        executeToolChain(chainReference, toolIndex + 1)
     end
-    
-    -- Discover capabilities
-    discoverProcessCapabilities(processId)
-    
-    -- Add to registry
-    registeredProcesses[processId] = {
-      timestamp = os.time(),
-      registeredBy = msg.From
-    }
-    
-    msg.reply({
-      Data = "Process registration initiated: " .. processId,
-      Action = "RegistrationResponse"
-    })
-  end
+end, "Tool-Chain-Reference")
+
+-- Handler: Receive ADP Info responses and register tools
+Handlers.add("ProcessInfo", Handlers.utils.hasMatchingTag("Action", "Info-Response"),
+    function(msg)
+        initializeMCPClient()
+
+        local success, adpInfo = pcall(json.decode, msg.Data)
+        if not success or not adpInfo then
+            print("Failed to parse ADP info from " .. msg.From)
+            return
+        end
+
+        if adpInfo.protocolVersion == "1.0" and adpInfo.handlers then
+            registerToolsFromProcess(msg.From, adpInfo)
+        else
+            print("Process " .. msg.From .. " is not ADP v1.0 compliant")
+        end
+    end
 )
 
--- Handle Info Responses from discovered processes
-Handlers.add("InfoResponse",
-  { Action = "Info-Response" },
-  function(msg)
-    local success, capabilities = pcall(json.decode, msg.Data)
-    
-    if not success then
-      print("Failed to parse capabilities from process: " .. msg.From)
-      return
+-- Handler: List available tools
+Handlers.add("ListTools", Handlers.utils.hasMatchingTag("Action", "ListTools"),
+    function(msg)
+        initializeMCPClient()
+
+        local toolList = {}
+        for toolKey, tool in pairs(ToolRegistry.tools) do
+            table.insert(toolList, {
+                key = toolKey,
+                process = ToolRegistry.processes[tool.processId].name,
+                processId = tool.processId,
+                action = tool.action,
+                description = tool.description,
+                category = tool.category,
+                parameterCount = #tool.parameters
+            })
+        end
+
+        ao.send({
+            Target = msg.From,
+            Action = "ListTools-Response",
+            Data = json.encode({
+                success = true,
+                tools = toolList,
+                processCount = #ToolRegistry.processes,
+                toolCount = #toolList
+            })
+        })
     end
-    
-    processCapabilities[msg.From] = capabilities
-    
-    -- Register handlers as tools
-    if capabilities.handlers then
-      for _, handler in ipairs(capabilities.handlers) do
-        registerToolFromADP(msg.From, handler)
-      end
-      
-      print("Registered " .. #capabilities.handlers .. " tools from process: " .. (capabilities.name or msg.From))
-    end
-  end
 )
 
--- List Available Tools
-Handlers.add("ListTools",
-  { Action = "ListTools" },
-  function(msg)
-    local toolList = {}
-    
-    for toolName, tool in pairs(availableTools) do
-      toolList[toolName] = {
-        process = tool.process,
-        description = tool.description,
-        parameters = tool.parameters,
-        returns = tool.returns
-      }
+-- Handler: Use a discovered tool
+Handlers.add("UseTool", Handlers.utils.hasMatchingTag("Action", "UseTool"),
+    function(msg)
+        local toolKey = msg.Tags.Tool
+        local paramsJson = msg.Data or "{}"
+
+        if not toolKey then
+            ao.send({
+                Target = msg.From,
+                Action = "UseTool-Response",
+                Data = json.encode({
+                    success = false,
+                    error = "Tool key is required"
+                })
+            })
+            return
+        end
+
+        local tool = ToolRegistry.tools[toolKey]
+        if not tool then
+            ao.send({
+                Target = msg.From,
+                Action = "UseTool-Response",
+                Data = json.encode({
+                    success = false,
+                    error = "Tool not found: " .. toolKey
+                })
+            })
+            return
+        end
+
+        local success, params = pcall(json.decode, paramsJson)
+        if not success then
+            params = {}
+        end
+
+        -- Build message tags from parameters
+        local messageTags = { Action = tool.action }
+        for key, value in pairs(params) do
+            messageTags[key] = tostring(value)
+        end
+
+        -- Call the tool on its process
+        ao.send({
+            Target = tool.processId,
+            Tags = messageTags
+        })
+
+        ao.send({
+            Target = msg.From,
+            Action = "UseTool-Response",
+            Data = json.encode({
+                success = true,
+                tool = toolKey,
+                processId = tool.processId,
+                action = tool.action,
+                message = "Tool called successfully"
+            })
+        })
     end
-    
-    msg.reply({
-      Data = json.encode({
-        tools = toolList,
-        count = #availableTools,
-        registeredProcesses = registeredProcesses
-      }),
-      Action = "ToolsResponse"
-    })
-  end
 )
 
--- Set AI Process
-Handlers.add("SetAIProcess",
-  { Action = "SetAIProcess" },
-  function(msg)
-    local processId = msg.Tags.ProcessId or msg.Data
-    
-    if not validateProcessId(processId) then
-      msg.reply({
-        Data = "Error: Invalid process ID",
-        Action = "ConfigResponse",
-        Tags = { Error = "InvalidProcessId" }
-      })
-      return
+-- Handler: AI-guided task execution with tool selection
+Handlers.add("ExecuteTask", Handlers.utils.hasMatchingTag("Action", "ExecuteTask"),
+    function(msg)
+        local task = msg.Data or msg.Tags.Task
+        local reference = msg.Tags.Reference or generateReference()
+
+        if not task then
+            ao.send({
+                Target = msg.From,
+                Action = "ExecuteTask-Response",
+                Data = json.encode({
+                    success = false,
+                    error = "Task description is required"
+                })
+            })
+            return
+        end
+
+        initializeMCPClient()
+
+        -- Build context about available tools for the AI
+        local toolContext = "Available tools:\n"
+        for toolKey, tool in pairs(ToolRegistry.tools) do
+            toolContext = toolContext .. "- " .. tool.action .. " (" .. tool.category .. "): " .. tool.description .. "\n"
+        end
+
+        -- Create enhanced prompt for APUS Router with structured response format
+        local enhancedPrompt = "Task: " .. task .. "\n\n" .. toolContext .. "\nAnalyze this task and provide a JSON response with the following structure:\n{\n  \"analysis\": \"your analysis of the task\",\n  \"tools_needed\": [\n    {\n      \"tool\": \"ProcessId:Action\",\n      \"parameters\": {\"param1\": \"value1\"},\n      \"order\": 1,\n      \"description\": \"what this tool does\"\n    }\n  ],\n  \"execution_plan\": \"step by step plan\"\n}\n\nIf no tools are needed, set tools_needed to an empty array."
+
+        -- Track the task
+        Tasks[reference] = {
+            task = task,
+            prompt = enhancedPrompt,
+            status = "processing",
+            starttime = os.time(),
+            reference = reference,
+            requestor = msg.From
+        }
+
+        -- Send to APUS Router for AI analysis
+        ao.send({
+            Target = APUS_ROUTER,
+            Action = "Infer",
+            Data = enhancedPrompt,
+            ["X-Reference"] = reference,
+            ["X-Context"] = "tool-guided-execution"
+        })
+
+        ao.send({
+            Target = msg.From,
+            Action = "ExecuteTask-Response",
+            Data = json.encode({
+                success = true,
+                reference = reference,
+                task = task,
+                message = "Task analysis initiated with AI guidance",
+                availableTools = #ToolRegistry.tools
+            })
+        })
     end
-    
-    AI_PROCESS = processId
-    
-    msg.reply({
-      Data = "AI process set to: " .. processId,
-      Action = "ConfigResponse"
-    })
-  end
 )
 
--- Cleanup old queries (prevent memory leaks)
-Handlers.add("Cleanup",
-  { Action = "Cron" },
-  function(msg)
-    local now = os.time()
-    local timeout = 300 -- 5 minutes
-    
-    for queryId, query in pairs(activeQueries) do
-      if now - query.timestamp > timeout then
-        print("Cleaning up expired query: " .. queryId)
-        activeQueries[queryId] = nil
-      end
+-- Handler: Regular inference (kept for compatibility)
+Handlers.add("SendInfer", Handlers.utils.hasMatchingTag("Action", "Infer"),
+    function(msg)
+        local reference = msg["X-Reference"] or msg.Reference or generateReference()
+
+        -- Build the inference request
+        local request = {
+            Target = APUS_ROUTER,
+            Action = "Infer",
+            ["X-Prompt"] = msg.Data,
+            ["X-Reference"] = reference
+        }
+
+        -- Add optional parameters if provided
+        if msg["X-Session"] then
+            request["X-Session"] = msg["X-Session"]
+        end
+        if msg["X-Options"] then
+            request["X-Options"] = msg["X-Options"]
+        end
+
+        -- Track the task
+        Tasks[reference] = {
+            prompt = request["X-Prompt"],
+            status = "processing",
+            starttime = os.time(),
+            reference = reference,
+            requestor = msg.From
+        }
+
+        -- Send the request to APUS Router
+        ao.send(request)
+
+        -- Send confirmation back to requester
+        ao.send({
+            Target = msg.From,
+            Action = "Infer-Submitted",
+            Data = "Inference request submitted with reference: " .. reference,
+            ["X-Reference"] = reference
+        })
     end
-  end
 )
 
--- Initialization
-print("MCP Client Process initialized")
-print("Register processes with: Send({Target = '" .. ao.id .. "', Action = 'RegisterProcess', ProcessId = 'your-process-id'})")
-print("Set AI process with: Send({Target = '" .. ao.id .. "', Action = 'SetAIProcess', ProcessId = 'ai-process-id'})")
-print("Query with: Send({Target = '" .. ao.id .. "', Action = 'Query', Data = 'your question'})")
+-- Handler: Receive responses from APUS Router
+Handlers.add("AcceptResponse", Handlers.utils.hasMatchingTag("Action", "Infer-Response"),
+    function(msg)
+        local reference = msg.Tags["X-Reference"] or ""
+
+        if not Tasks[reference] then
+            print("Received response for unknown reference: " .. reference)
+            return
+        end
+
+        local task = Tasks[reference]
+
+        -- Check for error responses
+        if msg.Tags["Code"] then
+            Tasks[reference].status = "failed"
+            Tasks[reference].error_message = msg.Tags["Message"] or "Unknown error"
+            Tasks[reference].error_code = msg.Tags["Code"]
+            Tasks[reference].endtime = os.time()
+
+            if task.requestor then
+                ao.send({
+                    Target = task.requestor,
+                    Action = "Task-Failed",
+                    Data = json.encode({
+                        reference = reference,
+                        error = Tasks[reference].error_message
+                    })
+                })
+            end
+
+            print("Inference failed for reference " .. reference .. ": " .. Tasks[reference].error_message)
+            return
+        end
+
+        -- Process successful response
+        Tasks[reference].response = msg.Data or ""
+        Tasks[reference].endtime = os.time()
+        Tasks[reference].duration = Tasks[reference].endtime - Tasks[reference].starttime
+
+        -- Check if this was a tool-guided execution and parse AI response for tool recommendations
+        if task.requestor and task.task then
+            -- Try to parse AI response as JSON to extract tool recommendations
+            local success, aiResponse = pcall(json.decode, Tasks[reference].response)
+            
+            if success and aiResponse and aiResponse.tools_needed and type(aiResponse.tools_needed) == "table" then
+                -- AI provided structured response with tool recommendations
+                Tasks[reference].status = "executing-tools"
+                Tasks[reference].toolsToExecute = aiResponse.tools_needed
+                Tasks[reference].aiAnalysis = aiResponse.analysis or ""
+                Tasks[reference].executionPlan = aiResponse.execution_plan or ""
+                Tasks[reference].toolResults = {}
+                
+                print("AI recommended " .. #aiResponse.tools_needed .. " tools for task: " .. task.task)
+                
+                if #aiResponse.tools_needed > 0 then
+                    -- Execute tools in order
+                    executeToolChain(reference, 1)
+                else
+                    -- No tools needed, send AI analysis as final result
+                    Tasks[reference].status = "success"
+                    ao.send({
+                        Target = task.requestor,
+                        Action = "Task-Completed",
+                        Data = json.encode({
+                            reference = reference,
+                            task = task.task,
+                            aiAnalysis = aiResponse.analysis,
+                            executionPlan = aiResponse.execution_plan,
+                            toolsUsed = 0,
+                            duration = Tasks[reference].duration
+                        })
+                    })
+                end
+            else
+                -- AI provided unstructured response, treat as regular inference
+                Tasks[reference].status = "success"
+                ao.send({
+                    Target = task.requestor,
+                    Action = "Task-Completed",
+                    Data = json.encode({
+                        reference = reference,
+                        task = task.task,
+                        response = Tasks[reference].response,
+                        duration = Tasks[reference].duration,
+                        note = "AI provided unstructured response - no automatic tool execution"
+                    })
+                })
+            end
+        else
+            -- Regular inference task
+            Tasks[reference].status = "success"
+        end
+
+        if Tasks[reference].status == "success" then
+            print("Task completed for reference " .. reference .. " in " .. Tasks[reference].duration .. " seconds")
+        end
+    end
+)
+
+-- Handler: Check status of tasks or tools
+Handlers.add("Status", Handlers.utils.hasMatchingTag("Action", "Status"),
+    function(msg)
+        local reference = msg.Tags["Reference"] or msg.Tags["X-Reference"]
+
+        if reference then
+            -- Status of specific task
+            local task = Tasks[reference]
+            if not task then
+                ao.send({
+                    Target = msg.From,
+                    Action = "Status-Response",
+                    Data = json.encode({
+                        success = false,
+                        error = "Task not found for reference: " .. reference
+                    })
+                })
+                return
+            end
+
+            local response_data = {
+                reference = reference,
+                status = task.status,
+                starttime = task.starttime
+            }
+
+            if task.task then
+                response_data.task = task.task
+            end
+            if task.prompt then
+                response_data.prompt = string.sub(task.prompt, 1, 200) .. "..."
+            end
+
+            if task.status == "success" then
+                response_data.response = task.response
+                response_data.endtime = task.endtime
+                response_data.duration = task.duration
+            elseif task.status == "failed" then
+                response_data.error_message = task.error_message
+                response_data.error_code = task.error_code
+                response_data.endtime = task.endtime
+            end
+
+            ao.send({
+                Target = msg.From,
+                Action = "Status-Response",
+                Data = json.encode(response_data)
+            })
+        else
+            -- General status
+            initializeMCPClient()
+
+            local activeCount = 0
+            local completedCount = 0
+            local failedCount = 0
+
+            for _, task in pairs(Tasks) do
+                if task.status == "processing" then
+                    activeCount = activeCount + 1
+                elseif task.status == "success" then
+                    completedCount = completedCount + 1
+                elseif task.status == "failed" then
+                    failedCount = failedCount + 1
+                end
+            end
+
+            ao.send({
+                Target = msg.From,
+                Action = "Status-Response",
+                Data = json.encode({
+                    success = true,
+                    mcp = {
+                        registeredProcesses = #ToolRegistry.processes,
+                        availableTools = #ToolRegistry.tools
+                    },
+                    tasks = {
+                        active = activeCount,
+                        completed = completedCount,
+                        failed = failedCount,
+                        total = activeCount + completedCount + failedCount
+                    }
+                })
+            })
+        end
+    end
+)
+
+-- ADP-compliant Info handler for MCP client
+Handlers.add("Info", Handlers.utils.hasMatchingTag("Action", "Info"),
+    function(msg)
+        initializeMCPClient()
+
+        local adpInfo = {
+            protocolVersion = "1.0",
+            name = "MCP Client for AO/Permaweb",
+            version = "1.0.0",
+            description = "MCP client that discovers tools from ADP-compliant processes and uses APUS Router for AI-guided task execution",
+            handlers = {
+                {
+                    action = "DiscoverProcess",
+                    pattern = {"Action"},
+                    description = "Discover and register tools from an ADP-compliant process",
+                    tags = {
+                        {
+                            name = "ProcessId",
+                            type = "string",
+                            required = true,
+                            description = "AO process ID to discover tools from"
+                        }
+                    },
+                    category = "mcp",
+                    version = "1.0"
+                },
+                {
+                    action = "ListTools",
+                    pattern = {"Action"},
+                    description = "List all discovered tools from registered processes",
+                    tags = {},
+                    category = "mcp",
+                    version = "1.0"
+                },
+                {
+                    action = "UseTool",
+                    pattern = {"Action"},
+                    description = "Use a discovered tool with parameters",
+                    tags = {
+                        {
+                            name = "Tool",
+                            type = "string",
+                            required = true,
+                            description = "Tool key (processId:action format)"
+                        }
+                    },
+                    category = "mcp",
+                    version = "1.0"
+                },
+                {
+                    action = "ExecuteTask",
+                    pattern = {"Action"},
+                    description = "Execute a task with AI-guided tool selection",
+                    tags = {
+                        {
+                            name = "Task",
+                            type = "string",
+                            required = false,
+                            description = "Task description (can also be in Data)"
+                        },
+                        {
+                            name = "Reference",
+                            type = "string",
+                            required = false,
+                            description = "Optional reference ID for tracking"
+                        }
+                    },
+                    category = "ai-guided",
+                    version = "1.0"
+                },
+                {
+                    action = "Infer",
+                    pattern = {"Action"},
+                    description = "Send direct inference request to APUS Router",
+                    tags = {
+                        {
+                            name = "X-Reference",
+                            type = "string",
+                            required = false,
+                            description = "Reference ID for tracking"
+                        },
+                        {
+                            name = "X-Session",
+                            type = "string",
+                            required = false,
+                            description = "Session ID for context"
+                        }
+                    },
+                    category = "inference",
+                    version = "1.0"
+                },
+                {
+                    action = "Status",
+                    pattern = {"Action"},
+                    description = "Get status of tasks or general system status",
+                    tags = {
+                        {
+                            name = "Reference",
+                            type = "string",
+                            required = false,
+                            description = "Task reference ID (omit for general status)"
+                        }
+                    },
+                    category = "monitoring",
+                    version = "1.0"
+                },
+                {
+                    action = "Info",
+                    pattern = {"Action"},
+                    description = "Get MCP client information and capabilities",
+                    tags = {},
+                    category = "core",
+                    version = "1.0"
+                }
+            },
+            capabilities = {
+                adpCompliant = true,
+                mcpVersion = "2024-11-05",
+                toolDiscovery = true,
+                aiGuidedExecution = true,
+                apusIntegration = true
+            },
+            statistics = {
+                registeredProcesses = #ToolRegistry.processes,
+                availableTools = #ToolRegistry.tools,
+                apusRouter = APUS_ROUTER
+            }
+        }
+
+        ao.send({
+            Target = msg.From,
+            Action = "Info-Response",
+            Data = json.encode(adpInfo)
+        })
+    end
+)
+
+-- Initialize on load
+initializeMCPClient()
+print("MCP Client for AO/Permaweb loaded")
+print("APUS Router: " .. APUS_ROUTER)
+print("Ready to discover tools and execute AI-guided tasks")
